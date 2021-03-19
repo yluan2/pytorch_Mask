@@ -1,68 +1,116 @@
-import os
-import torch
-import numpy as np
-import torchvision
-from torch.utils import data
-from PIL import Image
-import torch.nn as nn
 from torch.utils.data import DataLoader
+import torch
+import torch.nn as nn
+import torchvision.transforms as transforms
+import torchvision.datasets
 from torchvision.datasets import ImageFolder
-from torchvision import transforms
-import visdom
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),  # 缩放到224 * 224
-    # transforms.CenterCrop(256),   #中心剪裁后四周padding补充 (后续可以padding)
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[.5, .5, .5], std=[.5, .5, .5])  # 均值为0 方差为1 的正态分布
-])
 
-# 0 -> mask  1-> nonmask  [tensor][label]
-train_dataset = ImageFolder('./data/train', transform=transform)
-# train 每四个为一组
-train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+def data_loader():
+    transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        # transforms.CenterCrop(256)   #中心剪裁后四周padding补充 (后续可以padding)
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.4990, 0.4567, 0.4188], std=[0.2913, 0.2778, 0.2836])
+    ])
+    trainset = ImageFolder('./data/train', transform=transform)
 
-"""  显示图片
-to_pil_image = transforms.ToPILImage()
-for image, label in train_dataloader:
-    img = to_pil_image(image[0])
-    img.show()
-"""
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=32,
+                                               shuffle=True, num_workers=2)
+    testset = ImageFolder('./data/test', transform=transform)
+    test_loader = torch.utils.data.DataLoader(testset, batch_size=1000,
+                                              shuffle=False, num_workers=2)
+
+    return train_loader, test_loader
 
 
 class CNN(nn.Module):
     def __init__(self):
-        super(CNN, self).__init__()
-        self.step1 = nn.Sequential(
-            # 输入深度， 输出深度，卷积核大小（应该是随意的）
-            nn.Conv2d(3, 9, 3, padding=1),  # 224 + 2 - 3 + 1= 224
-            # 是否将计算值覆盖 （true -> 节省运算内存 || 不写也可以）
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2)  # 224 /2 = 112
+        super().__init__()
+        self.conv_layer = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),  # in=3x256x256; out=32x256x256
+            nn.Tanh(),
+            nn.MaxPool2d(2),  # out=64x128x128
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),  # in=32x128x128, out=16x128x128
+            nn.Tanh(),
+            nn.MaxPool2d(2),  # out=16x64x64
+            nn.Conv2d(16, 8, kernel_size=3, padding=1),  # in=16x64x64, out=8x64x64
+            nn.Tanh(),
+            nn.MaxPool2d(2)  # out=8x32x32
         )
-        self.step2 = nn.Sequential(
-            nn.Conv2d(9, 18, 5, padding=1),  # 112 + 2 - 5 + 1 = 110
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2)  # 110 / 2 = 55
-        )
-        self.step3 = nn.Sequential(
-            nn.Conv2d(18, 36, 4, padding=1),  # 55 + 2 - 4 + 1 = 54
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2)  # 54 / 2 = 27
-        )
-        self.stepLinear = nn.Sequential(
-            nn.Linear(27 * 27 * 36, 112),
-            nn.ReLU(inplace=True),
-            nn.Linear(112, 3)  # 输出分类
+
+        self.fc_layer = nn.Sequential(
+            nn.Dropout(p=0.1),
+            nn.Linear(8 * 32 * 32, 32 * 32),
+            nn.Tanh(),
+            nn.Dropout(p=0.1),
+            nn.Linear(32 * 32, 1024),
+            nn.Tanh(),
+            nn.Dropout(p=0.1),
+            nn.Linear(1024, 128),
+            nn.Tanh(),
+            nn.Dropout(p=0.1),
+            nn.Linear(128, 3)
         )
 
     def forward(self, x):
-        step1_out = self.step1(x)
-        step2_out = self.step2(step1_out)
-        step3_out = self.step3(step2_out)
-        out = self.stepLinear(step3_out.view(-1, step3_out.size(0)))
-        return out
+        # conv layer
+        x = self.conv_layer(x)
+
+        # flatten
+        x = x.view(x.size(0), -1)
+
+        # fc layer
+        x = self.fc_layer(x)
+
+        return x
+
+def train_loop(num_epochs):
+    total_step = len(train_loader)
+    loss_list = []
+    acc_list = []
+    for epoch in range(num_epochs):
+        for i, (images, labels) in enumerate(train_loader):
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss_list.append(loss.item())
+            print(loss_list)
+            # Backprop and optimisation
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            # Train accuracy
+            total = labels.size(0)
+            _, predicted = torch.max(outputs.data, 1)
+            correct = (predicted == labels).sum().item()
+            print(correct / total)
+            acc_list.append(correct / total)
+            print(i)
+            if (i + 1) % 30 == 0:
+                print('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}, Accuracy: {:.2f}%'
+                    .format(epoch + 1, num_epochs, i + 1, total_step, loss.item(),
+                        (correct / total) * 100))
 
 
-model = CNN()
-print(model)
+if __name__ == '__main__':
+
+    train_loader, _ = data_loader()
+    _, test_loader = data_loader()
+    model = CNN()
+    criterion = nn.CrossEntropyLoss()
+    learning_rate = 0.001
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    num_epochs = 4
+    train_loop(num_epochs)
+    model.eval()
+    with torch.no_grad():
+        correct = 0
+        total = 0
+        for images, labels in test_loader:
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+        print('Test Accuracy of the model on the test images: {} %'
+              .format((correct / total) * 100))
+
